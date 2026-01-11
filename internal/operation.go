@@ -1,0 +1,311 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/nxadm/tail"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func (s *Streamer) tail(ctx context.Context, path string) {
+	entryBase := entry{Host: s.hostname}
+
+	if s.isK8s {
+		// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
+		// eg: 	/var/log/pods/mit-runtime_runtime-aws-605-worker-65bfc994c9-kcb84_b7fecddb-34f2-404c-abad-b542fe6d5947/runtime-aws-605-worker/0.log
+		parts := strings.Split(path, "/")
+		if len(parts) >= 3 {
+			podDir := parts[len(parts)-3]
+			podParts := strings.Split(podDir, "_")
+			entryBase.Namespace = podParts[0]
+			entryBase.Pod = podParts[1]
+			entryBase.Container = parts[len(parts)-2]
+			image, imageId, curated := s.getK8sMetadata(ctx, entryBase.Namespace, entryBase.Pod, entryBase.Container)
+			if !curated {
+				return
+			}
+			entryBase.Image = image
+			entryBase.ImageId = imageId
+		}
+	} else {
+		// VM/Bare Metal: Use path and hostname as identifiers
+		entryBase.Namespace = "non-k8s"
+		entryBase.Pod = s.hostname
+		entryBase.Container = filepath.Base(path)
+		entryBase.Image = "os-native"
+		entryBase.ImageId = "n/a"
+		if !s.isPodCurated(&entryBase.Namespace, nil) {
+			return
+		}
+	}
+
+	logger := s.logger.With().
+		Str("namespace", entryBase.Namespace).
+		Str("pod", entryBase.Pod).
+		Str("container", entryBase.Container).
+		Str("path", path).
+		Logger()
+
+	t, err := tail.TailFile(path, tail.Config{
+		Follow:   true,
+		ReOpen:   true,
+		Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd},
+	})
+	if err != nil {
+		logger.Error().Err(err).Msgf("tailing failed")
+		return
+	}
+	defer t.Stop()
+
+	logger.Info().Msg("tailing started")
+	defer func() {
+		logger.Info().Msg("tailing aborted")
+	}()
+
+	for line := range t.Lines {
+		select {
+		case <-s.kill:
+			t.Cleanup()
+			s.removeItemFromMetadataCache(entryBase.Namespace + "/" + entryBase.Pod + "/" + entryBase.Container)
+			s.flush(s.entries)
+			return
+		default:
+		}
+		entry := entryBase
+		if s.isK8s {
+			// CRI format: <ts> <stream> <flag> <msg>
+			logParts := strings.SplitN(line.Text, " ", 4)
+			if len(logParts) == 4 {
+				entry.Logs = logParts[3]
+			} else {
+				entry.Logs = line.Text
+			}
+		} else {
+			entry.Logs = line.Text
+		}
+		if s.meetsCriteria(&line.Text) {
+			s.pileUpOrFlush(entry)
+		}
+	}
+}
+
+func (s *Streamer) meetsCriteria(line *string) bool {
+	if line == nil || len(*line) == 0 {
+		return false
+	}
+	if !s.coreFilterRegex.MatchString(*line) {
+		return false
+	}
+	if s.cfg.Operator == "and" {
+		// 4xx status code must be in conjunction with 'failed' or 'error'
+		if s.regexp4xxValue != nil && s.regexp4xxValue.MatchString(*line) {
+			// short circuit if either 'failed' or 'error' is present
+			if s.failedRegex.MatchString(*line) || s.errorRegex.MatchString(*line) {
+				return true
+			}
+		}
+		// 5xx status code must be in conjunction with 'failed' or 'error'
+		if s.regexp5xxValue != nil && s.regexp5xxValue.MatchString(*line) {
+			// short circuit if either 'failed' or 'error' is present
+			if s.failedRegex.MatchString(*line) || s.errorRegex.MatchString(*line) {
+				return true
+			}
+		}
+		// fallback all filters must match
+		for _, filter := range s.filtersRegex {
+			if !filter.MatchString(*line) {
+				return false
+			}
+		}
+		return true
+	}
+	// 4xx status code must be in conjunction with 'failed' or 'error'
+	if s.regexp4xxValue != nil && s.regexp4xxValue.MatchString(*line) {
+		// short circuit if either 'failed' or 'error' is present
+		if s.failedRegex.MatchString(*line) || s.errorRegex.MatchString(*line) {
+			return true
+		}
+	}
+	// 5xx status code must be in conjunction with 'failed' or 'error'
+	if s.regexp5xxValue != nil && s.regexp5xxValue.MatchString(*line) {
+		// short circuit if either 'failed' or 'error' is present
+		if s.failedRegex.MatchString(*line) || s.errorRegex.MatchString(*line) {
+			return true
+		}
+	}
+	for _, filter := range s.filtersRegex {
+		if filter.MatchString(*line) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Streamer) removeItemFromMetadataCache(key string) {
+	s.metadataCache.Delete(key)
+}
+
+func (s *Streamer) populateMetadataCache(ctx context.Context) {
+	s.logger.Info().Msg("populating k8s metadata cache")
+	p, err := s.clientset.CoreV1().Pods(v1.NamespaceAll).List(ctx, v1.ListOptions{})
+	if err != nil {
+		s.logger.Error().Err(err).Msg("s.clientset.CoreV1().Pods().List() failed")
+		return
+	}
+	for _, pod := range p.Items {
+		for _, c := range pod.Status.ContainerStatuses {
+			key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+			s.metadataCache.Store(key, []string{c.Image, c.ImageID})
+		}
+	}
+	s.logger.Info().Int("cachedEntries", len(p.Items)).Msg("k8s metadata cache populated")
+}
+
+func (s *Streamer) getK8sMetadata(ctx context.Context, ns, pod, container string) (string, string, bool) {
+	key := ns + "/" + pod + "/" + container
+	if val, ok := s.metadataCache.Load(key); ok {
+		m, _ := val.([]string)
+		if len(m) >= 2 {
+			return m[0], m[1], true
+		}
+	}
+	p, err := s.clientset.CoreV1().Pods(ns).Get(ctx, pod, v1.GetOptions{})
+	if err != nil {
+		s.logger.Error().Err(err).Msg("s.clientset.CoreV1().Pods(ns).Get() failed")
+		return "unknown", "unknown", false
+	}
+	if !s.isPodCurated(&ns, p.Labels) {
+		return "unknown", "unknown", false
+	}
+	for _, c := range p.Status.ContainerStatuses {
+		if c.Name == container {
+			s.metadataCache.Store(key, []string{c.Image, c.ImageID})
+			return c.Image, c.ImageID, true
+		}
+	}
+	return "unknown", "unknown", false
+}
+
+func (s *Streamer) isPodCurated(namespace *string, labels map[string]string) bool {
+	if namespace != nil && len(s.cfg.NamespacesToExclude) > 0 {
+		if slices.Contains(s.cfg.NamespacesToExclude, *namespace) {
+			return false
+		}
+	}
+	if namespace != nil && len(s.cfg.NamespacesToInclude) > 0 {
+		if !slices.Contains(s.cfg.NamespacesToInclude, *namespace) {
+			return false
+		}
+	}
+	if len(labels) > 0 && len(s.cfg.PodLabelsToInclude) > 0 {
+		for key, value := range labels {
+			if slices.Contains(s.cfg.PodLabelsToInclude, key+"="+value) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Streamer) pileUpOrFlush(logEntry entry) {
+	s.locker.Lock()
+	s.entries = append(s.entries, logEntry)
+	shouldFlush := len(s.entries) >= s.cfg.BatchSize
+	if shouldFlush {
+		batchToSend := s.entries
+		s.entries = s.entries[:0]
+		s.locker.Unlock()
+		s.flush(batchToSend)
+		return
+	}
+	s.locker.Unlock()
+}
+
+func (s *Streamer) watchForNewLogs(ctx context.Context, rootPath string) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		s.logger.Error().Err(err).Msg("fsnotify.NewWatcher() failed")
+		return
+	}
+	defer watcher.Close()
+	filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			watcher.Add(path)
+		}
+		return nil
+	})
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.kill:
+			return
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if event.Op&fsnotify.Create == fsnotify.Create {
+				info, err := os.Stat(event.Name)
+				if err == nil && info.IsDir() {
+					watcher.Add(event.Name)
+				} else if filepath.Ext(event.Name) == ".log" {
+					s.logger.Debug().Str("logFile", event.Name).Msg("new log detected")
+					go s.tail(ctx, event.Name)
+				}
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			s.logger.Error().Err(err).Msg("fsnotify watcher error")
+		}
+	}
+}
+
+func (s *Streamer) flush(batchToSend []entry) {
+	s.logger.Debug().Int("batchSize", len(batchToSend)).Str("targetURL", s.cfg.TargetURLWithHostAndScheme).Msg("flushing a batch")
+
+	// TODO:
+	// 1. encrypt the payload
+	// 2. pass authn key
+
+	r, w := io.Pipe()
+	go func() {
+		defer w.Close()
+		err := json.NewEncoder(w).Encode(batchToSend)
+		if err != nil {
+			s.logger.Error().Err(err).Msg("json.NewEncoder(w).Encode(batchToSend) failed")
+			return
+		}
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, s.cfg.TargetURLWithHostAndScheme, r)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("http.NewRequest() failed")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mit-Subscription-ID", s.cfg.SubscriptionId)
+	req.Header.Set("Mit-Org-ID", s.cfg.OgranisationId)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("s.httpClient.Do(req) failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		s.logger.Error().Err(err).Int("status", resp.StatusCode).Bytes("response", body).Msg("post failed")
+	}
+}

@@ -1,0 +1,51 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Package",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/main.go",
+      "args": [
+        // "--namespacesToInclude",
+        // "mit-backend",
+        "--namespacesToExclude",
+        "kube-system",
+        "--targetURLWithHostAndScheme",
+        "http://localhost:8000/curated_log_streamer",
+        // "--keywords",
+        // "redis",
+        "--keywords",
+        "failed",
+        "--keywords",
+        "error",
+        // "--keywords",
+        // "fatal",
+        "--keywords",
+        "panic",
+        // "--keywords",
+        // "ApplicationStats",
+        // "--keywords",
+        // "exception",
+        // "--keywords",
+        // "timeout",
+        // "--keywords",
+        // "timedout",
+        // "--keywords",
+        // "token",
+        // "--keywords",
+        // "expired",
+        "--keywords",
+        "5xx",
+        "--keywords",
+        "4xx",
+        // "--operator",
+        "and"
+      ]
+    }
+  ]
+}

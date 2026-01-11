@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: uls-sa
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: uls-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: uls-binding
+subjects:
+  - kind: ServiceAccount
+    name: uls-sa
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: uls-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: uls
+  namespace: kube-system
+  labels:
+    k8s-app: uls
+spec:
+  selector:
+    matchLabels:
+      k8s-app: uls
+  template:
+    metadata:
+      labels:
+        k8s-app: uls
+    spec:
+      serviceAccountName: uls-sa
+      terminationGracePeriodSeconds: 30
+      # Targeting specific architecture to prevent "no match for platform" errors
+      nodeSelector:
+        kubernetes.io/arch: amd64 # Set to "arm64" if nodes are ARM-based
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      containers:
+        - name: uls
+          image: bhardwaz007/universal-log-streamer:v0.0.0
+          imagePullPolicy: Always
+          args:
+            - "--keywords"
+            - "invalid token"
+            - "--keywords"
+            - "failed"
+            - "--keywords"
+            - "timeout"
+            - "--keywords"
+            - "timedout"
+            - "--keywords"
+            - "exception"
+            - "--keywords"
+            - "panic"
+            - "--keywords"
+            - "4xx"
+            - "--keywords"
+            - "5xx"
+            - "--namespacesToInclude"
+            - "mit-runtime"
+            - "--namespacesToInclude"
+            - "mit-backend"
+            - "--targetURLWithHostAndScheme"
+            - "https://e48761828938.ngrok-free.app/curated_log_streamer"
+          resources:
+            limits:
+              memory: 200Mi
+              cpu: 100m
+            requests:
+              memory: 100Mi
+              cpu: 50m
+          volumeMounts:
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+      volumes:
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
