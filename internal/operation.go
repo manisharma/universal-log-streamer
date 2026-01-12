@@ -236,7 +236,11 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 			}
 			logSource := fmt.Sprintf("%s/%s_%s_%s", rootPath, pod.Namespace, pod.Name, string(pod.UID))
 			err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
-				if !info.IsDir() && filepath.Ext(path) == ".log" {
+				if err != nil {
+					s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory for new pod failed")
+					return nil
+				}
+				if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
 					go s.tail(ctx, path)
 				}
 				return nil
