@@ -118,10 +118,16 @@ func NewStreamer(cfg object.Config, logger zerolog.Logger) *Streamer {
 }
 
 func (s *Streamer) Start(ctx context.Context) error {
-	logSource := "/var/log"
-	if s.isK8s {
-		logSource = "/var/log/pods"
-		s.populateMetadataCache(ctx)
+	var logSource string
+	s.cfg.Path = strings.TrimSpace(s.cfg.Path)
+	if s.cfg.Path != "" {
+		logSource = s.cfg.Path
+	} else {
+		logSource = "/var/log"
+		if s.isK8s {
+			logSource = "/var/log/pods"
+			s.populateMetadataCache(ctx)
+		}
 	}
 	s.logger.Info().Msgf("crawling on %s (K8s: %v). Watching: %s", s.hostname, s.isK8s, logSource)
 	err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
