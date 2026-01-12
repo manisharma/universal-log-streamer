@@ -165,6 +165,7 @@ func (s *Streamer) getK8sMetadata(ctx context.Context, ns, pod, container string
 			return m[0], m[1], true
 		}
 	}
+	// just in case
 	p, err := s.clientset.CoreV1().Pods(ns).Get(ctx, pod, v1.GetOptions{})
 	if err != nil {
 		s.logger.Error().Err(err).Msg("s.clientset.CoreV1().Pods(ns).Get() failed")
@@ -218,7 +219,50 @@ func (s *Streamer) pileUpOrFlush(logEntry entry) {
 	s.locker.Unlock()
 }
 
-func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
+func (s *Streamer) periodicK8sPodTailer(ctx context.Context) {
+	s.logger.Debug().Msg("periodicK8sTailer started")
+	t := time.NewTicker(30 * time.Second)
+	defer func() {
+		t.Stop()
+		s.logger.Debug().Msg("periodicK8sTailer stopped")
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.kill:
+			return
+		case <-t.C:
+			s.metadataCache.Range(func(key, value any) bool {
+				if ci, ok := value.(containerInfo); ok {
+					if !ci.IsBeingTailed {
+						// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
+						logSource := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s", ci.Namespace, ci.Pod, ci.UID, ci.Container)
+						err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
+							if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
+								ci.IsBeingTailed = true
+								s.metadataCache.Store(key, ci)
+								go s.tail(ctx, path)
+							}
+							return nil
+						})
+						if err != nil {
+							s.logger.Error().Err(err).
+								Str("namespace", ci.Namespace).
+								Str("pod", ci.Pod).Str("container", ci.Container).
+								Str("logSource", logSource).
+								Msg("filepath.Walk() failed")
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+func (s *Streamer) watchForNewPods(ctx context.Context) {
 	var (
 		factory  = informers.NewSharedInformerFactoryWithOptions(s.clientset, time.Minute*5)
 		informer = factory.Core().V1().Pods()
@@ -234,24 +278,35 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
 				return
 			}
-			logSource := fmt.Sprintf("%s/%s_%s_%s", rootPath, pod.Namespace, pod.Name, string(pod.UID))
-			err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory for new pod failed")
-					return nil
-				}
-				if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
-					go s.tail(ctx, path)
-				}
-				return nil
-			})
-			if err != nil {
-				s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory for new pod failed")
+			for _, c := range pod.Status.ContainerStatuses {
+				_, cancel := context.WithCancel(ctx)
+				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+				s.metadataCache.Store(key, containerInfo{
+					Images:        []string{c.Image, c.ImageID},
+					IsBeingTailed: false,
+					Namespace:     pod.Namespace,
+					Pod:           pod.Name,
+					UID:           string(pod.UID),
+					Container:     c.Name,
+					Cancel:        cancel,
+				})
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				s.logger.Error().Msg("addFn: obj.(*corev1.Pod) failed")
 				return
 			}
 			for _, c := range pod.Status.ContainerStatuses {
 				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
-				s.metadataCache.LoadOrStore(key, []string{c.Image, c.ImageID})
+				item, ok := s.metadataCache.LoadAndDelete(key)
+				if ok {
+					c, ok := item.(containerInfo)
+					if ok && c.Cancel != nil {
+						c.Cancel()
+					}
+				}
 			}
 		},
 	})
@@ -262,7 +317,7 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 		s.logger.Error().Msg(err.Error())
 	}
 
-	s.logger.Info().Msg("informed cache synced, now watching for new pods")
+	s.logger.Info().Msg("informer cache synced, watching for new pods")
 
 	select {
 	case <-ctx.Done():

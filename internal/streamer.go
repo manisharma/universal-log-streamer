@@ -129,8 +129,9 @@ func (s *Streamer) Start(ctx context.Context) {
 		logSource = "/var/log"
 	}
 	if s.isK8s {
-		logSource = "/var/log/pods"
-		go s.watchForNewPods(ctx, logSource)
+		// logSource = "/var/log/pods"
+		go s.watchForNewPods(ctx)
+		go s.periodicK8sPodTailer(ctx)
 	} else {
 		s.logger.Info().Msgf("crawling log directory %s on %s", logSource, s.hostname)
 		err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {

@@ -1,5 +1,7 @@
 package internal
 
+import "context"
+
 type entry struct {
 	Namespace string `json:"namespace"`
 	Pod       string `json:"pod"`
@@ -8,4 +10,14 @@ type entry struct {
 	ImageId   string `json:"imageId"`
 	Logs      string `json:"logs"`
 	Host      string `json:"host"`
+}
+
+type containerInfo struct {
+	Namespace     string
+	Pod           string
+	UID           string
+	Container     string
+	Images        []string
+	IsBeingTailed bool
+	Cancel        context.CancelFunc
 }
