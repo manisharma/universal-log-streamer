@@ -185,10 +185,6 @@ Contributions are welcome! Please follow these guidelines:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## Author
-
-Manish Sharma
-
 ## Support
 
 For issues and questions, please open an issue on GitHub.
