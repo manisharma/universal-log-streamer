@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -233,16 +234,20 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
 				return
 			}
+			logSource := fmt.Sprintf("%s/%s_%s_%s", rootPath, pod.Namespace, pod.Name, string(pod.UID))
+			err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
+				if !info.IsDir() && filepath.Ext(path) == ".log" {
+					go s.tail(ctx, path)
+				}
+				return nil
+			})
+			if err != nil {
+				s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory for new pod failed")
+				return
+			}
 			for _, c := range pod.Status.ContainerStatuses {
 				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
-				_, ok := s.metadataCache.Load(key)
-				if !ok {
-					s.metadataCache.Store(key, []string{c.Image, c.ImageID})
-					s.logger.Info().Msgf("new pod detected: %s/%s, starting to tail container: %s", pod.Namespace, pod.Name, c.Name)
-					// eg: /var/log/pods/mit-runtime_runtime-aws-605-worker-65bfc994c9-kcb84_b7fecddb-34f2-404c-abad-b542fe6d5947/runtime-aws-605-worker/0.log
-					logPath := fmt.Sprintf("%s/%s_%s_%s/%s/0.log", rootPath, pod.Namespace, pod.Name, string(pod.UID), c.Name)
-					go s.tail(ctx, logPath)
-				}
+				s.metadataCache.LoadOrStore(key, []string{c.Image, c.ImageID})
 			}
 		},
 	})
