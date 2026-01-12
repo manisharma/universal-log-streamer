@@ -67,10 +67,7 @@ func main() {
 	)
 
 	logger.Debug().Msg("log streamer is streaming...")
-	err = streamer.Start(ctx)
-	if err != nil {
-		logger.Error().Err(err).Msg("logStreamer.Start(ctx) failed")
-	}
+	streamer.Start(ctx)
 
 	// await interruptions
 	signal.Notify(deathStream, os.Interrupt, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGINT)

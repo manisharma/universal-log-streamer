@@ -21,8 +21,8 @@ func NewStreamer(config object.Config, logger zerolog.Logger) (*internal.Streame
 	return internal.NewStreamer(config, logger), nil
 }
 
-func (s *Streamer) Start(ctx context.Context) error {
-	return s.s.Start(ctx)
+func (s *Streamer) Start(ctx context.Context) {
+	s.s.Start(ctx)
 }
 
 func (s *Streamer) Stop() {
