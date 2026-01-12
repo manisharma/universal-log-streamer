@@ -117,32 +117,28 @@ func NewStreamer(cfg object.Config, logger zerolog.Logger) *Streamer {
 	return s
 }
 
-func (s *Streamer) Start(ctx context.Context) error {
+func (s *Streamer) Start(ctx context.Context) {
 	var logSource string
-	s.cfg.Path = strings.TrimSpace(s.cfg.Path)
 	if s.cfg.Path != "" {
 		logSource = s.cfg.Path
 	} else {
 		logSource = "/var/log"
-		if s.isK8s {
-			logSource = "/var/log/pods"
-			s.populateMetadataCache(ctx)
-		}
-	}
-	s.logger.Info().Msgf("crawling on %s (K8s: %v). Watching: %s", s.hostname, s.isK8s, logSource)
-	err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() && filepath.Ext(path) == ".log" {
-			go s.tail(ctx, path)
-		}
-		return nil
-	})
-	if err != nil {
-		s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory failed")
 	}
 	if s.isK8s {
+		logSource = "/var/log/pods"
 		go s.watchForNewPods(ctx, logSource)
+	} else {
+		s.logger.Info().Msgf("crawling log directory %s on %s", logSource, s.hostname)
+		err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
+			if !info.IsDir() && filepath.Ext(path) == ".log" {
+				go s.tail(ctx, path)
+			}
+			return nil
+		})
+		if err != nil {
+			s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory failed")
+		}
 	}
-	return err
 }
 
 func (s *Streamer) Stop() {

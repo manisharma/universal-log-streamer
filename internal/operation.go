@@ -156,22 +156,6 @@ func (s *Streamer) removeItemFromMetadataCache(key string) {
 	s.metadataCache.Delete(key)
 }
 
-func (s *Streamer) populateMetadataCache(ctx context.Context) {
-	s.logger.Info().Msg("populating k8s metadata cache")
-	p, err := s.clientset.CoreV1().Pods(v1.NamespaceAll).List(ctx, v1.ListOptions{})
-	if err != nil {
-		s.logger.Error().Err(err).Msg("s.clientset.CoreV1().Pods().List() failed")
-		return
-	}
-	for _, pod := range p.Items {
-		for _, c := range pod.Status.ContainerStatuses {
-			key := pod.Namespace + "/" + pod.Name + "/" + c.Name
-			s.metadataCache.Store(key, []string{c.Image, c.ImageID})
-		}
-	}
-	s.logger.Info().Int("cachedEntries", len(p.Items)).Msg("k8s metadata cache populated")
-}
-
 func (s *Streamer) getK8sMetadata(ctx context.Context, ns, pod, container string) (string, string, bool) {
 	key := ns + "/" + pod + "/" + container
 	if val, ok := s.metadataCache.Load(key); ok {
@@ -239,8 +223,6 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 		informer = factory.Core().V1().Pods()
 	)
 
-	s.logger.Info().Msg("watching for new pods to tail logs")
-
 	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pod, ok := obj.(*corev1.Pod)
@@ -251,11 +233,16 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
 				return
 			}
-			for _, c := range pod.Spec.Containers {
-				s.logger.Info().Msgf("new pod detected: %s/%s, starting to tail container: %s", pod.Namespace, pod.Name, c.Name)
-				// eg: /var/log/pods/mit-runtime_runtime-aws-605-worker-65bfc994c9-kcb84_b7fecddb-34f2-404c-abad-b542fe6d5947/runtime-aws-605-worker/0.log
-				logPath := fmt.Sprintf("%s/%s_%s_%s/%s/0.log", rootPath, pod.Namespace, pod.Name, string(pod.UID), c.Name)
-				go s.tail(ctx, logPath)
+			for _, c := range pod.Status.ContainerStatuses {
+				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+				_, ok := s.metadataCache.Load(key)
+				if !ok {
+					s.metadataCache.Store(key, []string{c.Image, c.ImageID})
+					s.logger.Info().Msgf("new pod detected: %s/%s, starting to tail container: %s", pod.Namespace, pod.Name, c.Name)
+					// eg: /var/log/pods/mit-runtime_runtime-aws-605-worker-65bfc994c9-kcb84_b7fecddb-34f2-404c-abad-b542fe6d5947/runtime-aws-605-worker/0.log
+					logPath := fmt.Sprintf("%s/%s_%s_%s/%s/0.log", rootPath, pod.Namespace, pod.Name, string(pod.UID), c.Name)
+					go s.tail(ctx, logPath)
+				}
 			}
 		},
 	})
@@ -266,7 +253,13 @@ func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
 		s.logger.Error().Msg(err.Error())
 	}
 
-	<-s.kill
+	s.logger.Info().Msg("informed cache synced, now watching for new pods")
+
+	select {
+	case <-ctx.Done():
+	case <-s.kill:
+	}
+
 	factory.Shutdown()
 	s.logger.Info().Msg("stopped watching for new pods")
 }

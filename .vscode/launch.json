@@ -11,8 +11,8 @@
       "mode": "auto",
       "program": "${workspaceFolder}/main.go",
       "args": [
-        // "--namespacesToInclude",
-        // "mit-backend",
+        "--namespacesToInclude",
+        "mit-backend",
         "--namespacesToExclude",
         "kube-system",
         "--targetURLWithHostAndScheme",
