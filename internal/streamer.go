@@ -44,7 +44,11 @@ func NewStreamer(cfg object.Config, logger zerolog.Logger) *Streamer {
 	var s = new(Streamer)
 	s.hostname, _ = os.Hostname()
 	// does service account token exist ?
-	if _, err := os.Stat(serviceAccountTokenPath); err == nil {
+	fileInfo, err := os.Stat(serviceAccountTokenPath)
+	if err != nil {
+		logger.Info().Err(err).Msg("os.Stat(serviceAccountTokenPath) failed")
+	}
+	if fileInfo != nil {
 		s.isK8s = true
 		config, _ := rest.InClusterConfig()
 		s.clientset, _ = kubernetes.NewForConfig(config)
