@@ -139,7 +139,9 @@ func (s *Streamer) Start(ctx context.Context) error {
 	if err != nil {
 		s.logger.Error().Err(err).Str("logSource", logSource).Msg("crawling log directory failed")
 	}
-	go s.watchForNewLogs(ctx, logSource)
+	if s.isK8s {
+		go s.watchForNewPods(ctx, logSource)
+	}
 	return err
 }
 

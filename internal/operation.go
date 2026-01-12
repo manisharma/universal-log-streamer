@@ -3,16 +3,19 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/nxadm/tail"
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/tools/cache"
 )
 
 func (s *Streamer) tail(ctx context.Context, path string) {
@@ -230,45 +233,42 @@ func (s *Streamer) pileUpOrFlush(logEntry entry) {
 	s.locker.Unlock()
 }
 
-func (s *Streamer) watchForNewLogs(ctx context.Context, rootPath string) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		s.logger.Error().Err(err).Msg("fsnotify.NewWatcher() failed")
-		return
-	}
-	defer watcher.Close()
-	filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-		if info.IsDir() {
-			watcher.Add(path)
-		}
-		return nil
+func (s *Streamer) watchForNewPods(ctx context.Context, rootPath string) {
+	var (
+		factory  = informers.NewSharedInformerFactoryWithOptions(s.clientset, time.Minute*5)
+		informer = factory.Core().V1().Pods()
+	)
+
+	s.logger.Info().Msg("watching for new pods to tail logs")
+
+	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				s.logger.Error().Msg("addFn: obj.(*corev1.Pod) failed")
+				return
+			}
+			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
+				return
+			}
+			for _, c := range pod.Spec.Containers {
+				s.logger.Info().Msgf("new pod detected: %s/%s, starting to tail container: %s", pod.Namespace, pod.Name, c.Name)
+				// eg: /var/log/pods/mit-runtime_runtime-aws-605-worker-65bfc994c9-kcb84_b7fecddb-34f2-404c-abad-b542fe6d5947/runtime-aws-605-worker/0.log
+				logPath := fmt.Sprintf("%s/%s_%s_%s/%s/0.log", rootPath, pod.Namespace, pod.Name, string(pod.UID), c.Name)
+				go s.tail(ctx, logPath)
+			}
+		},
 	})
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.kill:
-			return
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Op&fsnotify.Create == fsnotify.Create {
-				info, err := os.Stat(event.Name)
-				if err == nil && info.IsDir() {
-					watcher.Add(event.Name)
-				} else if filepath.Ext(event.Name) == ".log" {
-					s.logger.Debug().Str("logFile", event.Name).Msg("new log detected")
-					go s.tail(ctx, event.Name)
-				}
-			}
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			s.logger.Error().Err(err).Msg("fsnotify watcher error")
-		}
+
+	factory.Start(s.kill)
+	if !cache.WaitForNamedCacheSync("logs_streamer", s.kill, informer.Informer().HasSynced) {
+		err := fmt.Errorf("cache.WaitForNamedCacheSync() failed")
+		s.logger.Error().Msg(err.Error())
 	}
+
+	<-s.kill
+	factory.Shutdown()
+	s.logger.Info().Msg("stopped watching for new pods")
 }
 
 func (s *Streamer) flush(batchToSend []entry) {

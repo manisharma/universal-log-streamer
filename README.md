@@ -6,7 +6,7 @@ A high-performance, Kubernetes-aware log streaming and filtering tool that monit
 
 - **Kubernetes Native**: Automatically detects Kubernetes environment and extracts pod/container metadata
 - **Universal Deployment**: Works in both Kubernetes clusters and standalone VM/bare-metal environments
-- **Real-time Log Tailing**: Efficiently monitors log files using fsnotify and tail libraries
+- **Real-time Log Tailing**: Efficiently monitors log files using k8s informers & fsnotify to tail logs
 - **Advanced Filtering**: Supports multiple keywords with AND/OR operators
 - **HTTP Status Code Detection**: Special handling for 4xx/5xx status codes with contextual filtering
 - **Batch Processing**: Configurable batch sizes for efficient network utilization
