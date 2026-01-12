@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/manisharma/universal-log-streamer/internal"
+	"github.com/manisharma/universal-log-streamer/pkg/core/object"
 	"github.com/rs/zerolog"
 )
 
@@ -18,7 +19,7 @@ var Build = "v0.0.0"
 
 func main() {
 	var (
-		config      internal.Config
+		config      object.Config
 		ctx, cancel = context.WithCancel(context.Background())
 		logger      = zerolog.New(os.Stdout).Level(zerolog.DebugLevel).With().Str("app", "ulp").Str("build", Build).Timestamp().Logger()
 	)
@@ -36,6 +37,7 @@ func main() {
 	flag.StringVar(&config.SubscriptionId, "subscriptionId", "", "subscription id for authorization")
 	flag.StringVar(&config.EncryptionKey, "encryptionKey", "", "encryption key to encrypt the payload")
 	flag.StringVar(&config.AuthToken, "authToken", "", "token for authentication of http request")
+	flag.StringVar(&config.Path, "path", "", "log dir path")
 	flag.Parse()
 
 	if config.Keywords.Len() == 0 {

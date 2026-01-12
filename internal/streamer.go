@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/manisharma/universal-log-streamer/pkg/core/object"
 	"github.com/rs/zerolog"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -18,7 +19,7 @@ import (
 var serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 type Streamer struct {
-	cfg             Config
+	cfg             object.Config
 	metadataCache   sync.Map
 	counter         uint64
 	clientset       *kubernetes.Clientset
@@ -39,7 +40,7 @@ type Streamer struct {
 	kill            chan struct{}
 }
 
-func NewStreamer(cfg Config, logger zerolog.Logger) *Streamer {
+func NewStreamer(cfg object.Config, logger zerolog.Logger) *Streamer {
 	var s = new(Streamer)
 	s.hostname, _ = os.Hostname()
 	// does service account token exist ?
