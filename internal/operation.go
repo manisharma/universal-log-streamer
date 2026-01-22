@@ -59,9 +59,10 @@ func (s *Streamer) tail(ctx context.Context, path string) {
 		Logger()
 
 	t, err := tail.TailFile(path, tail.Config{
-		Follow:   true,
-		ReOpen:   true,
-		Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd},
+		Follow:    true,
+		ReOpen:    true,
+		MustExist: true,
+		Location:  &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd},
 	})
 	if err != nil {
 		logger.Error().Err(err).Msgf("tailing failed")
@@ -258,6 +259,7 @@ func (s *Streamer) periodicK8sPodTailer(ctx context.Context) {
 				}
 				return true
 			})
+			s.logger.Debug().Msg("metadataCache iterated")
 		}
 	}
 }
@@ -272,7 +274,7 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 		AddFunc: func(obj any) {
 			pod, ok := obj.(*corev1.Pod)
 			if !ok {
-				s.logger.Error().Msg("addFn: obj.(*corev1.Pod) failed")
+				s.logger.Error().Msg("AddFunc: obj.(*corev1.Pod) failed")
 				return
 			}
 			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
@@ -281,6 +283,7 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 			for _, c := range pod.Status.ContainerStatuses {
 				_, cancel := context.WithCancel(ctx)
 				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+				s.logger.Debug().Str("key", key).Msg("entry added to metadataCache")
 				s.metadataCache.Store(key, containerInfo{
 					Images:        []string{c.Image, c.ImageID},
 					IsBeingTailed: false,
@@ -295,7 +298,7 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 		DeleteFunc: func(obj interface{}) {
 			pod, ok := obj.(*corev1.Pod)
 			if !ok {
-				s.logger.Error().Msg("addFn: obj.(*corev1.Pod) failed")
+				s.logger.Error().Msg("DeleteFunc: obj.(*corev1.Pod) failed")
 				return
 			}
 			for _, c := range pod.Status.ContainerStatuses {
@@ -306,6 +309,9 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 					if ok && c.Cancel != nil {
 						c.Cancel()
 					}
+					s.logger.Info().Str("key", key).Msg("entry removed from metadataCache")
+				} else {
+					s.logger.Warn().Str("key", key).Msg("entry not found in metadataCache")
 				}
 			}
 		},
