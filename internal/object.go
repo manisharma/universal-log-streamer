@@ -13,11 +13,10 @@ type entry struct {
 }
 
 type containerInfo struct {
-	Namespace     string
-	Pod           string
-	UID           string
-	Container     string
-	Images        []string
-	IsBeingTailed bool
-	Cancel        context.CancelFunc
+	Namespace string
+	Pod       string
+	UID       string
+	Container string
+	Images    []string
+	Cancel    context.CancelFunc
 }

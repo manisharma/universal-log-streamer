@@ -20,6 +20,8 @@ import (
 )
 
 func (s *Streamer) tail(ctx context.Context, path string) {
+	// wait for some time to allow pod to be fully initialized
+	time.Sleep(5 * time.Second)
 	entryBase := entry{Host: s.hostname}
 
 	if s.isK8s {
@@ -220,50 +222,6 @@ func (s *Streamer) pileUpOrFlush(logEntry entry) {
 	s.locker.Unlock()
 }
 
-func (s *Streamer) periodicK8sPodTailer(ctx context.Context) {
-	s.logger.Debug().Msg("periodicK8sTailer started")
-	t := time.NewTicker(30 * time.Second)
-	defer func() {
-		t.Stop()
-		s.logger.Debug().Msg("periodicK8sTailer stopped")
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.kill:
-			return
-		case <-t.C:
-			s.metadataCache.Range(func(key, value any) bool {
-				if ci, ok := value.(containerInfo); ok {
-					if !ci.IsBeingTailed {
-						// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
-						logSource := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s", ci.Namespace, ci.Pod, ci.UID, ci.Container)
-						err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
-							if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
-								ci.IsBeingTailed = true
-								s.metadataCache.Store(key, ci)
-								go s.tail(ctx, path)
-							}
-							return nil
-						})
-						if err != nil {
-							s.logger.Error().Err(err).
-								Str("namespace", ci.Namespace).
-								Str("pod", ci.Pod).Str("container", ci.Container).
-								Str("logSource", logSource).
-								Msg("filepath.Walk() failed")
-						}
-					}
-				}
-				return true
-			})
-			s.logger.Debug().Msg("metadataCache iterated")
-		}
-	}
-}
-
 func (s *Streamer) watchForNewPods(ctx context.Context) {
 	var (
 		factory  = informers.NewSharedInformerFactoryWithOptions(s.clientset, time.Minute*5)
@@ -281,18 +239,33 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 				return
 			}
 			for _, c := range pod.Status.ContainerStatuses {
-				_, cancel := context.WithCancel(ctx)
-				key := pod.Namespace + "/" + pod.Name + "/" + c.Name
-				s.logger.Debug().Str("key", key).Msg("entry added to metadataCache")
-				s.metadataCache.Store(key, containerInfo{
-					Images:        []string{c.Image, c.ImageID},
-					IsBeingTailed: false,
-					Namespace:     pod.Namespace,
-					Pod:           pod.Name,
-					UID:           string(pod.UID),
-					Container:     c.Name,
-					Cancel:        cancel,
+				// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
+				logSource := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s", pod.Namespace, pod.Name, string(pod.UID), c.Name)
+				err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
+					if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
+						_, cancel := context.WithCancel(ctx)
+						key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+						s.metadataCache.Store(key, containerInfo{
+							Images:    []string{c.Image, c.ImageID},
+							Namespace: pod.Namespace,
+							Pod:       pod.Name,
+							UID:       string(pod.UID),
+							Container: c.Name,
+							Cancel:    cancel,
+						})
+						s.logger.Debug().Str("key", key).Msg("entry added to metadataCache")
+						go s.tail(ctx, path)
+					}
+					return nil
 				})
+				if err != nil {
+					s.logger.Error().Err(err).
+						Str("namespace", pod.Namespace).
+						Str("pod", pod.Name).
+						Str("container", c.Name).
+						Str("logSource", logSource).
+						Msg("filepath.Walk() failed")
+				}
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
