@@ -356,8 +356,12 @@ func (s *Streamer) flush(batchToSend []entry) {
 	}
 	defer resp.Body.Close()
 
+	requestID := resp.Header.Get("x-request-id")
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		s.logger.Error().Err(err).Int("status", resp.StatusCode).Bytes("response", body).Msg("post failed")
+		s.logger.Error().Err(err).Int("status", resp.StatusCode).Bytes("response", body).Str("x-request-id", requestID).Msg("post failed")
+	} else {
+		s.logger.Info().Int("status", resp.StatusCode).Str("x-request-id", requestID).Msg("batch flushed successfully")
 	}
 }
