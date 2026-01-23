@@ -230,48 +230,16 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 
 	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			pod, ok := obj.(*corev1.Pod)
-			if !ok {
-				s.logger.Error().Msg("AddFunc: obj.(*corev1.Pod) failed")
-				return
-			}
-			if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
-				return
-			}
-			for _, c := range pod.Status.ContainerStatuses {
-				// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
-				logSource := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s", pod.Namespace, pod.Name, string(pod.UID), c.Name)
-				err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
-					if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
-						_, cancel := context.WithCancel(ctx)
-						key := pod.Namespace + "/" + pod.Name + "/" + c.Name
-						s.metadataCache.Store(key, containerInfo{
-							Images:    []string{c.Image, c.ImageID},
-							Namespace: pod.Namespace,
-							Pod:       pod.Name,
-							UID:       string(pod.UID),
-							Container: c.Name,
-							Cancel:    cancel,
-						})
-						s.logger.Debug().Str("key", key).Msg("entry added to metadataCache")
-						go s.tail(ctx, path)
-					}
-					return nil
-				})
-				if err != nil {
-					s.logger.Error().Err(err).
-						Str("namespace", pod.Namespace).
-						Str("pod", pod.Name).
-						Str("container", c.Name).
-						Str("logSource", logSource).
-						Msg("filepath.Walk() failed")
-				}
-			}
+			s.safeAdd(ctx, obj, "AddFunc")
 		},
-		DeleteFunc: func(obj interface{}) {
+		UpdateFunc: func(_ any, obj any) {
+			s.safeAdd(ctx, obj, "UpdateFunc")
+		},
+		DeleteFunc: func(obj any) {
+			logger := s.logger.With().Str("source", "DeleteFunc").Logger()
 			pod, ok := obj.(*corev1.Pod)
 			if !ok {
-				s.logger.Error().Msg("DeleteFunc: obj.(*corev1.Pod) failed")
+				logger.Error().Msg("obj.(*corev1.Pod) failed")
 				return
 			}
 			for _, c := range pod.Status.ContainerStatuses {
@@ -282,7 +250,7 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 					if ok && c.Cancel != nil {
 						c.Cancel()
 					}
-					s.logger.Info().Str("key", key).Msg("entry removed from metadataCache")
+					logger.Info().Str("key", key).Msg("entry removed from metadataCache")
 				}
 			}
 		},
@@ -303,6 +271,52 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 
 	factory.Shutdown()
 	s.logger.Info().Msg("stopped watching for new pods")
+}
+
+func (s *Streamer) safeAdd(ctx context.Context, obj any, source string) {
+	logger := s.logger.With().Str("source", source).Logger()
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		logger.Error().Msg("obj.(*corev1.Pod) failed")
+		return
+	}
+	if pod == nil || !s.isPodCurated(&pod.Namespace, pod.Labels) {
+		return
+	}
+	for _, c := range pod.Status.ContainerStatuses {
+		key := pod.Namespace + "/" + pod.Name + "/" + c.Name
+		_, ok = s.metadataCache.Load(key)
+		if ok {
+			// already being tailed
+			continue
+		}
+		// Path: /var/log/pods/NAMESPACE_PODNAME_UID/CONTAINER/0.log
+		logSource := fmt.Sprintf("/var/log/pods/%s_%s_%s/%s", pod.Namespace, pod.Name, string(pod.UID), c.Name)
+		err := filepath.Walk(logSource, func(path string, info os.FileInfo, err error) error {
+			if info != nil && !info.IsDir() && filepath.Ext(path) == ".log" {
+				_, cancel := context.WithCancel(ctx)
+				s.metadataCache.Store(key, containerInfo{
+					Images:    []string{c.Image, c.ImageID},
+					Namespace: pod.Namespace,
+					Pod:       pod.Name,
+					UID:       string(pod.UID),
+					Container: c.Name,
+					Cancel:    cancel,
+				})
+				logger.Debug().Str("key", key).Msg("entry added to metadataCache")
+				go s.tail(ctx, path)
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error().Err(err).
+				Str("namespace", pod.Namespace).
+				Str("pod", pod.Name).
+				Str("container", c.Name).
+				Str("logSource", logSource).
+				Msg("filepath.Walk() failed")
+		}
+	}
 }
 
 func (s *Streamer) flush(batchToSend []entry) {
