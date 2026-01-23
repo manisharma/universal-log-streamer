@@ -283,8 +283,6 @@ func (s *Streamer) watchForNewPods(ctx context.Context) {
 						c.Cancel()
 					}
 					s.logger.Info().Str("key", key).Msg("entry removed from metadataCache")
-				} else {
-					s.logger.Warn().Str("key", key).Msg("entry not found in metadataCache")
 				}
 			}
 		},
