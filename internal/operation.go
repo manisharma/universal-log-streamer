@@ -79,6 +79,11 @@ func (s *Streamer) tail(ctx context.Context, path string) {
 
 	for line := range t.Lines {
 		select {
+		case <-ctx.Done():
+			t.Cleanup()
+			s.removeItemFromMetadataCache(entryBase.Namespace + "/" + entryBase.Pod + "/" + entryBase.Container)
+			s.flush(s.entries)
+			return
 		case <-s.kill:
 			t.Cleanup()
 			s.removeItemFromMetadataCache(entryBase.Namespace + "/" + entryBase.Pod + "/" + entryBase.Container)
