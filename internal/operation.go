@@ -62,7 +62,6 @@ func (s *Streamer) tail(ctx context.Context, path string) {
 
 	t, err := tail.TailFile(path, tail.Config{
 		Follow:    true,
-		ReOpen:    true,
 		MustExist: true,
 		Location:  &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd},
 	})
